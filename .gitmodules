@@ -4,3 +4,6 @@
 [submodule "prelude"]
 	path = prelude
 	url = git@github.com:OSS-Cosmic/buck2-prelude.git
+[submodule "TFSamples-Media"]
+	path = TFSamples-Media
+	url = git@github.com:OSS-Cosmic/TFSamples-Media.git

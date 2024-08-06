@@ -22,16 +22,34 @@
  * under the License.
 */
 
-#ifndef RESOURCES_H
-#define RESOURCES_H
+#include "resources.h.fsl"
 
-CBUFFER(uniformBlock, UPDATE_FREQ_PER_FRAME, b0, binding = 0)
+STRUCT(VSInput)
 {
-#if FT_MULTIVIEW
-    DATA(float4x4, mvp[VR_MULTIVIEW_COUNT], None);
-#else
-    DATA(float4x4, mvp, None);
-#endif
+	DATA(float3, Position, POSITION);
+	DATA(float3, Color, COLOR);
 };
 
-#endif
+STRUCT(VSOutput)
+{
+	DATA(float4, Position, SV_Position);
+	DATA(float4, Color, COLOR);
+	DATA(float, PointSize, SV_PointSize);
+};
+
+
+VSOutput VS_MAIN( VSInput In )
+{
+    INIT_MAIN;
+    VSOutput Out;
+
+  #if FT_MULTIVIEW
+    Out.Position = mul(Get(mvp)[VR_VIEW_ID], In.Position);
+  #else
+    Out.Position = mul(Get(mvp), In.Position);
+  #endif
+    Out.Color = float4(In.Color.rgb, 1.0);
+    Out.PointSize = 1.0f;
+
+    RETURN(Out);
+}

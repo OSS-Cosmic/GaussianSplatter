@@ -25,6 +25,7 @@
 // Unit Test for testing transformations using a solar system.
 // Tests the basic mat4 transformations, such as scaling, rotation, and translation.
 
+#include <cstdint>
 #define MAX_PLANETS 20 // Does not affect test, just for allocating space in uniform block. Must match with shader.
 
 // Interfaces
@@ -39,6 +40,8 @@
 #include "Forge/TF_Log.h"
 #include "Forge/Core/TF_Time.h"
 
+#include "Forge/Math/TF_Types.h"
+
 #include "Common_3/Utilities/RingBuffer.h"
 
 // Renderer
@@ -51,40 +54,32 @@
 
 #include "Forge/Mem/TF_Memory.h"
 
-/// Demo structures
-struct PlanetInfoStruct
-{
-    mat4  mTranslationMat;
-    mat4  mScaleMat;
-    mat4  mSharedMat; // Matrix to pass down to children
-    vec4  mColor;
-    uint  mParentIndex;
-    float mYOrbitSpeed; // Rotation speed around parent
-    float mZOrbitSpeed;
-    float mRotationSpeed; // Rotation speed around self
-    float mMorphingSpeed; // Speed of morphing betwee cube and sphere
-};
+///// Demo structures
+//struct PlanetInfoStruct
+//{
+//    mat4  mTranslationMat;
+//    mat4  mScaleMat;
+//    mat4  mSharedMat; // Matrix to pass down to children
+//    vec4  mColor;
+//    uint  mParentIndex;
+//    float mYOrbitSpeed; // Rotation speed around parent
+//    float mZOrbitSpeed;
+//    float mRotationSpeed; // Rotation speed around self
+//    float mMorphingSpeed; // Speed of morphing betwee cube and sphere
+//};
 
 struct UniformBlock
 {
     CameraMatrix mProjectView;
-    mat4         mToWorldMat[MAX_PLANETS];
-    vec4         mColor[MAX_PLANETS];
-    float        mGeometryWeight[MAX_PLANETS][4];
-
-    // Point Light Information
-    vec3 mLightPosition;
-    vec3 mLightColor;
 };
 
-struct UniformBlockSky
-{
-    CameraMatrix mProjectView;
-};
+//struct UniformBlockSky
+//{
+//    CameraMatrix mProjectView;
+//};
 
 // But we only need Two sets of resources (one in flight and one being used on CPU)
 const uint32_t gDataBufferCount = 2;
-const uint     gNumPlanets = 11;     // Sun, Mercury -> Neptune, Pluto, Moon
 const uint     gTimeOffset = 600000; // For visually better starting locations
 const float    gRotSelfScale = 0.0004f;
 const float    gRotOrbitYScale = 0.001f;
@@ -100,73 +95,39 @@ SwapChain*    pSwapChain = NULL;
 RenderTarget* pDepthBuffer = NULL;
 Semaphore*    pImageAcquiredSemaphore = NULL;
 
-Shader*      pSphereShader = NULL;
-Buffer*      pSphereVertexBuffer = NULL;
-Buffer*      pSphereIndexBuffer = NULL;
-uint32_t     gSphereIndexCount = 0;
-Pipeline*    pSpherePipeline = NULL;
-VertexLayout gSphereVertexLayout = {};
-uint32_t     gSphereLayoutType = 0;
+Shader* pParticleShader = NULL;
+Pipeline* pParticlePipeline = NULL;
 
-Shader*        pSkyBoxDrawShader = NULL;
-Buffer*        pSkyBoxVertexBuffer = NULL;
-Pipeline*      pSkyBoxDrawPipeline = NULL;
 RootSignature* pRootSignature = NULL;
-Sampler*       pSamplerSkyBox = NULL;
-Texture*       pSkyBoxTextures[6];
-DescriptorSet* pDescriptorSetTexture = { NULL };
-DescriptorSet* pDescriptorSetUniforms = { NULL };
-
+Buffer* pGaussianPosition = NULL;
+Buffer* pGaussianColor = NULL;
 Buffer* pProjViewUniformBuffer[gDataBufferCount] = { NULL };
-Buffer* pSkyboxUniformBuffer[gDataBufferCount] = { NULL };
+
+DescriptorSet* pDescriptorSetUniforms = { NULL };
 
 uint32_t     gFrameIndex = 0;
 ProfileToken gGpuProfileToken = PROFILE_INVALID_TOKEN;
 
-int              gNumberOfSpherePoints;
 UniformBlock     gUniformData;
-UniformBlockSky  gUniformDataSky;
-PlanetInfoStruct gPlanetInfoData[gNumPlanets];
-
 ICameraController* pCameraController = NULL;
 
 UIComponent* pGuiWindow = NULL;
 
 uint32_t gFontID = 0;
-
 QueryPool* pPipelineStatsQueryPool[gDataBufferCount] = {};
 
-const char* pSkyBoxImageFileNames[] = { "Skybox_right1.tex",  "Skybox_left2.tex",  "Skybox_top3.tex",
-                                        "Skybox_bottom4.tex", "Skybox_front5.tex", "Skybox_back6.tex" };
-
 FontDrawDesc gFrameTimeDraw;
-
-// Generate sky box vertex buffer
-const float gSkyBoxPoints[] = {
-    10.0f,  -10.0f, -10.0f, 6.0f, // -z
-    -10.0f, -10.0f, -10.0f, 6.0f,   -10.0f, 10.0f,  -10.0f, 6.0f,   -10.0f, 10.0f,
-    -10.0f, 6.0f,   10.0f,  10.0f,  -10.0f, 6.0f,   10.0f,  -10.0f, -10.0f, 6.0f,
-
-    -10.0f, -10.0f, 10.0f,  2.0f, //-x
-    -10.0f, -10.0f, -10.0f, 2.0f,   -10.0f, 10.0f,  -10.0f, 2.0f,   -10.0f, 10.0f,
-    -10.0f, 2.0f,   -10.0f, 10.0f,  10.0f,  2.0f,   -10.0f, -10.0f, 10.0f,  2.0f,
-
-    10.0f,  -10.0f, -10.0f, 1.0f, //+x
-    10.0f,  -10.0f, 10.0f,  1.0f,   10.0f,  10.0f,  10.0f,  1.0f,   10.0f,  10.0f,
-    10.0f,  1.0f,   10.0f,  10.0f,  -10.0f, 1.0f,   10.0f,  -10.0f, -10.0f, 1.0f,
-
-    -10.0f, -10.0f, 10.0f,  5.0f, // +z
-    -10.0f, 10.0f,  10.0f,  5.0f,   10.0f,  10.0f,  10.0f,  5.0f,   10.0f,  10.0f,
-    10.0f,  5.0f,   10.0f,  -10.0f, 10.0f,  5.0f,   -10.0f, -10.0f, 10.0f,  5.0f,
-
-    -10.0f, 10.0f,  -10.0f, 3.0f, //+y
-    10.0f,  10.0f,  -10.0f, 3.0f,   10.0f,  10.0f,  10.0f,  3.0f,   10.0f,  10.0f,
-    10.0f,  3.0f,   -10.0f, 10.0f,  10.0f,  3.0f,   -10.0f, 10.0f,  -10.0f, 3.0f,
-
-    10.0f,  -10.0f, 10.0f,  4.0f, //-y
-    10.0f,  -10.0f, -10.0f, 4.0f,   -10.0f, -10.0f, -10.0f, 4.0f,   -10.0f, -10.0f,
-    -10.0f, 4.0f,   -10.0f, -10.0f, 10.0f,  4.0f,   10.0f,  -10.0f, 10.0f,  4.0f,
+struct GaussianPoint {
+  uint64_t mPointId;
+  Tf32x3_s mPos;
+  Tf32x3_s mColor;
+  double mError;
+  uint64_t mTrackLength;
+  int* mPointIds;
+  int* mImageIds;
 };
+uint64_t mNumOfPoints;
+struct GaussianPoint* gGaussianPoints = NULL; 
 
 static unsigned char gPipelineStatsCharArray[2048] = {};
 static bstring       gPipelineStats = bfromarr(gPipelineStatsCharArray);
@@ -190,6 +151,7 @@ public:
         fsSetPathForResourceDir(pSystemFileIO, RM_CONTENT, RD_SCRIPTS, "Scripts");
         fsSetPathForResourceDir(pSystemFileIO, RM_DEBUG, RD_DEBUG, "Debug");
         fsSetPathForResourceDir(pSystemFileIO, RM_CONTENT, RD_GPU_CONFIG, "GPUCfg");
+        fsSetPathForResourceDir(pSystemFileIO, RM_CONTENT, RD_OTHER_FILES, "Other");
 
         // window and renderer setup
         RendererContextDesc rendererContextDesc = {};
@@ -241,34 +203,78 @@ public:
 
         initResourceLoaderInterface(pRenderer);
 
-        // Loads Skybox Textures
-        for (int i = 0; i < 6; ++i)
         {
-            TextureLoadDesc textureDesc = {};
-            textureDesc.pFileName = pSkyBoxImageFileNames[i];
-            textureDesc.ppTexture = &pSkyBoxTextures[i];
-            // Textures representing color should be stored in SRGB or HDR format
-            textureDesc.mCreationFlag = TEXTURE_CREATION_FLAG_SRGB;
-            addResource(&textureDesc, NULL);
+            FileStream fh = {};
+            if (!fsOpenStreamFromPath(RD_OTHER_FILES, "drjohnson/points3D.bin", FM_READ, &fh)) 
+                return false;
+            if(fsReadFromStream(&fh, &mNumOfPoints, sizeof(mNumOfPoints)) != sizeof(mNumOfPoints))
+                return false;
+            gGaussianPoints = (struct GaussianPoint*)tf_malloc(sizeof(GaussianPoint) * mNumOfPoints);
+            for(size_t pIdx = 0; pIdx < mNumOfPoints; pIdx++) {
+                //GaussianPoint point;
+                GaussianPoint* point = &gGaussianPoints[pIdx];
+                
+                uint64_t      pointId;
+                Tf64x3_s pos; 
+                Tu8x3_s color;
+                double        error;
+                uint64_t      trackLength;
+
+                if(fsReadFromStream(&fh, &pointId, sizeof(pointId)) != sizeof(pointId)) return false;
+                if(fsReadFromStream(&fh, &pos, sizeof(pos)) != sizeof(pos)) return false;
+                if(fsReadFromStream(&fh, &color, sizeof(color)) != sizeof(color)) return false;
+                if(fsReadFromStream(&fh, &error, sizeof(error)) != sizeof(error)) return false;
+                if(fsReadFromStream(&fh, &trackLength, sizeof(trackLength)) != sizeof(trackLength)) return false;
+                point->mPointId = pointId;
+                point->mPos = { (float)pos.x, (float)pos.y, (float)pos.z };
+                point->mColor = { ((float)color.x / 255.0f), ((float)color.y / 255.0f), ((float)color.z / 255.0f) };
+                point->mTrackLength = trackLength;
+                point->mError = error;
+                gGaussianPoints[pIdx].mPointIds = (int *)tf_malloc(sizeof(int) * trackLength);
+                gGaussianPoints[pIdx].mImageIds = (int *)tf_malloc(sizeof(int) * trackLength);
+                for (size_t tIdx = 0; tIdx < trackLength; tIdx++) {
+                    int image_idx;
+                    int point2d_idx;
+                    if (fsReadFromStream(&fh, &image_idx, sizeof(image_idx)) !=
+                        sizeof(image_idx))
+                      return false;
+                    if (fsReadFromStream(&fh, &point2d_idx, sizeof(point2d_idx)) !=
+                        sizeof(point2d_idx))
+                      return false;
+                    gGaussianPoints[pIdx].mPointIds[tIdx] = point2d_idx;
+                    gGaussianPoints[pIdx].mImageIds[tIdx] = image_idx;
+                }
+            }
         }
 
-        // Dynamic sampler that is bound at runtime
-        SamplerDesc samplerDesc = { FILTER_LINEAR,
-                                    FILTER_LINEAR,
-                                    MIPMAP_MODE_NEAREST,
-                                    ADDRESS_MODE_CLAMP_TO_EDGE,
-                                    ADDRESS_MODE_CLAMP_TO_EDGE,
-                                    ADDRESS_MODE_CLAMP_TO_EDGE };
-        addSampler(pRenderer, &samplerDesc, &pSamplerSkyBox);
-
-        uint64_t       skyBoxDataSize = 4 * 6 * 6 * sizeof(float);
-        BufferLoadDesc skyboxVbDesc = {};
-        skyboxVbDesc.mDesc.mDescriptors = DESCRIPTOR_TYPE_VERTEX_BUFFER;
-        skyboxVbDesc.mDesc.mMemoryUsage = RESOURCE_MEMORY_USAGE_GPU_ONLY;
-        skyboxVbDesc.mDesc.mSize = skyBoxDataSize;
-        skyboxVbDesc.pData = gSkyBoxPoints;
-        skyboxVbDesc.ppBuffer = &pSkyBoxVertexBuffer;
-        addResource(&skyboxVbDesc, NULL);
+        {
+          {
+            BufferLoadDesc positionVbDesc = {};
+            positionVbDesc.mDesc.mDescriptors = DESCRIPTOR_TYPE_VERTEX_BUFFER;
+            positionVbDesc.mDesc.mMemoryUsage = RESOURCE_MEMORY_USAGE_GPU_ONLY;
+            positionVbDesc.mDesc.mSize = sizeof(struct Tf32x3_s) * mNumOfPoints;
+            positionVbDesc.ppBuffer = &pGaussianPosition;
+            addResource(&positionVbDesc, NULL);
+          }
+          {
+            BufferLoadDesc colorVbDesc = {};
+            colorVbDesc.mDesc.mDescriptors = DESCRIPTOR_TYPE_VERTEX_BUFFER;
+            colorVbDesc.mDesc.mMemoryUsage = RESOURCE_MEMORY_USAGE_GPU_ONLY;
+            colorVbDesc.mDesc.mSize = sizeof(struct Tf32x3_s) * mNumOfPoints;
+            colorVbDesc.ppBuffer = &pGaussianColor;
+            addResource(&colorVbDesc, NULL);
+          }
+          BufferUpdateDesc positionUpdateDesc = {pGaussianPosition};
+          BufferUpdateDesc colorUpdateDesc = {pGaussianColor};
+          beginUpdateResource(&positionUpdateDesc);
+          beginUpdateResource(&colorUpdateDesc);
+          for (size_t i = 0; i < mNumOfPoints; i++) {
+            ((Tf32x3_s*)positionUpdateDesc.pMappedData)[i] = gGaussianPoints[i].mPos;
+            ((Tf32x3_s*)colorUpdateDesc.pMappedData)[i] = gGaussianPoints[i].mColor;
+          }
+          endUpdateResource(&colorUpdateDesc);
+          endUpdateResource(&positionUpdateDesc);
+        }
 
         BufferLoadDesc ubDesc = {};
         ubDesc.mDesc.mDescriptors = DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -280,10 +286,6 @@ public:
             ubDesc.mDesc.pName = "ProjViewUniformBuffer";
             ubDesc.mDesc.mSize = sizeof(UniformBlock);
             ubDesc.ppBuffer = &pProjViewUniformBuffer[i];
-            addResource(&ubDesc, NULL);
-            ubDesc.mDesc.pName = "SkyboxUniformBuffer";
-            ubDesc.mDesc.mSize = sizeof(UniformBlockSky);
-            ubDesc.ppBuffer = &pSkyboxUniformBuffer[i];
             addResource(&ubDesc, NULL);
         }
 
@@ -319,14 +321,6 @@ public:
         guiDesc.mStartPosition = vec2(mSettings.mWidth * 0.01f, mSettings.mHeight * 0.2f);
         uiCreateComponent(GetName(), &guiDesc, &pGuiWindow);
 
-        SliderUintWidget vertexLayoutWidget;
-        vertexLayoutWidget.mMin = 0;
-        vertexLayoutWidget.mMax = 1;
-        vertexLayoutWidget.mStep = 1;
-        vertexLayoutWidget.pData = &gSphereLayoutType;
-        UIWidget* pVLw = uiCreateComponentWidget(pGuiWindow, "Vertex Layout", &vertexLayoutWidget, WIDGET_TYPE_SLIDER_UINT);
-        uiSetWidgetOnEditedCallback(pVLw, nullptr, reloadRequest);
-
         if (pRenderer->pProperties->mPipelineStatsQueries)
         {
             static float4     color = { 1.0f, 1.0f, 1.0f, 1.0f };
@@ -336,124 +330,7 @@ public:
             uiCreateComponentWidget(pGuiWindow, "Pipeline Stats", &statsWidget, WIDGET_TYPE_DYNAMIC_TEXT);
         }
 
-        // const uint32_t numScripts = TF_ARRAY_COUNT(gWindowTestScripts);
-        // LuaScriptDesc  scriptDescs[numScripts] = {};
-        // for (uint32_t i = 0; i < numScripts; ++i)
-        //     scriptDescs[i].pScriptFileName = gWindowTestScripts[i];
-        // DEFINE_LUA_SCRIPTS(scriptDescs, numScripts);
-
         waitForAllResourceLoads();
-
-        // Setup planets (Rotation speeds are relative to Earth's, some values randomly given)
-        // Sun
-        gPlanetInfoData[0].mParentIndex = 0;
-        gPlanetInfoData[0].mYOrbitSpeed = 0; // Earth years for one orbit
-        gPlanetInfoData[0].mZOrbitSpeed = 0;
-        gPlanetInfoData[0].mRotationSpeed = 24.0f; // Earth days for one rotation
-        gPlanetInfoData[0].mTranslationMat = mat4::identity();
-        gPlanetInfoData[0].mScaleMat = mat4::scale(vec3(10.0f));
-        gPlanetInfoData[0].mColor = vec4(0.97f, 0.38f, 0.09f, 0.0f);
-        gPlanetInfoData[0].mMorphingSpeed = 0.2f;
-
-        // Mercury
-        gPlanetInfoData[1].mParentIndex = 0;
-        gPlanetInfoData[1].mYOrbitSpeed = 0.5f;
-        gPlanetInfoData[1].mZOrbitSpeed = 0.0f;
-        gPlanetInfoData[1].mRotationSpeed = 58.7f;
-        gPlanetInfoData[1].mTranslationMat = mat4::translation(vec3(10.0f, 0, 0));
-        gPlanetInfoData[1].mScaleMat = mat4::scale(vec3(1.0f));
-        gPlanetInfoData[1].mColor = vec4(0.45f, 0.07f, 0.006f, 1.0f);
-        gPlanetInfoData[1].mMorphingSpeed = 5;
-
-        // Venus
-        gPlanetInfoData[2].mParentIndex = 0;
-        gPlanetInfoData[2].mYOrbitSpeed = 0.8f;
-        gPlanetInfoData[2].mZOrbitSpeed = 0.0f;
-        gPlanetInfoData[2].mRotationSpeed = 243.0f;
-        gPlanetInfoData[2].mTranslationMat = mat4::translation(vec3(20.0f, 0, 5));
-        gPlanetInfoData[2].mScaleMat = mat4::scale(vec3(2));
-        gPlanetInfoData[2].mColor = vec4(0.6f, 0.32f, 0.006f, 1.0f);
-        gPlanetInfoData[2].mMorphingSpeed = 1;
-
-        // Earth
-        gPlanetInfoData[3].mParentIndex = 0;
-        gPlanetInfoData[3].mYOrbitSpeed = 1.0f;
-        gPlanetInfoData[3].mZOrbitSpeed = 0.0f;
-        gPlanetInfoData[3].mRotationSpeed = 1.0f;
-        gPlanetInfoData[3].mTranslationMat = mat4::translation(vec3(30.0f, 0, 0));
-        gPlanetInfoData[3].mScaleMat = mat4::scale(vec3(4));
-        gPlanetInfoData[3].mColor = vec4(0.07f, 0.028f, 0.61f, 1.0f);
-        gPlanetInfoData[3].mMorphingSpeed = 1;
-
-        // Mars
-        gPlanetInfoData[4].mParentIndex = 0;
-        gPlanetInfoData[4].mYOrbitSpeed = 2.0f;
-        gPlanetInfoData[4].mZOrbitSpeed = 0.0f;
-        gPlanetInfoData[4].mRotationSpeed = 1.1f;
-        gPlanetInfoData[4].mTranslationMat = mat4::translation(vec3(40.0f, 0, 0));
-        gPlanetInfoData[4].mScaleMat = mat4::scale(vec3(3));
-        gPlanetInfoData[4].mColor = vec4(0.79f, 0.07f, 0.006f, 1.0f);
-        gPlanetInfoData[4].mMorphingSpeed = 1;
-
-        // Jupiter
-        gPlanetInfoData[5].mParentIndex = 0;
-        gPlanetInfoData[5].mYOrbitSpeed = 11.0f;
-        gPlanetInfoData[5].mZOrbitSpeed = 0.0f;
-        gPlanetInfoData[5].mRotationSpeed = 0.4f;
-        gPlanetInfoData[5].mTranslationMat = mat4::translation(vec3(50.0f, 0, 0));
-        gPlanetInfoData[5].mScaleMat = mat4::scale(vec3(8));
-        gPlanetInfoData[5].mColor = vec4(0.32f, 0.13f, 0.13f, 1);
-        gPlanetInfoData[5].mMorphingSpeed = 6;
-
-        // Saturn
-        gPlanetInfoData[6].mParentIndex = 0;
-        gPlanetInfoData[6].mYOrbitSpeed = 29.4f;
-        gPlanetInfoData[6].mZOrbitSpeed = 0.0f;
-        gPlanetInfoData[6].mRotationSpeed = 0.5f;
-        gPlanetInfoData[6].mTranslationMat = mat4::translation(vec3(60.0f, 0, 0));
-        gPlanetInfoData[6].mScaleMat = mat4::scale(vec3(6));
-        gPlanetInfoData[6].mColor = vec4(0.45f, 0.45f, 0.21f, 1.0f);
-        gPlanetInfoData[6].mMorphingSpeed = 1;
-
-        // Uranus
-        gPlanetInfoData[7].mParentIndex = 0;
-        gPlanetInfoData[7].mYOrbitSpeed = 84.07f;
-        gPlanetInfoData[7].mZOrbitSpeed = 0.0f;
-        gPlanetInfoData[7].mRotationSpeed = 0.8f;
-        gPlanetInfoData[7].mTranslationMat = mat4::translation(vec3(70.0f, 0, 0));
-        gPlanetInfoData[7].mScaleMat = mat4::scale(vec3(7));
-        gPlanetInfoData[7].mColor = vec4(0.13f, 0.13f, 0.32f, 1.0f);
-        gPlanetInfoData[7].mMorphingSpeed = 1;
-
-        // Neptune
-        gPlanetInfoData[8].mParentIndex = 0;
-        gPlanetInfoData[8].mYOrbitSpeed = 164.81f;
-        gPlanetInfoData[8].mZOrbitSpeed = 0.0f;
-        gPlanetInfoData[8].mRotationSpeed = 0.9f;
-        gPlanetInfoData[8].mTranslationMat = mat4::translation(vec3(80.0f, 0, 0));
-        gPlanetInfoData[8].mScaleMat = mat4::scale(vec3(8));
-        gPlanetInfoData[8].mColor = vec4(0.21f, 0.028f, 0.79f, 1.0f);
-        gPlanetInfoData[8].mMorphingSpeed = 1;
-
-        // Pluto - Not a planet XDD
-        gPlanetInfoData[9].mParentIndex = 0;
-        gPlanetInfoData[9].mYOrbitSpeed = 247.7f;
-        gPlanetInfoData[9].mZOrbitSpeed = 1.0f;
-        gPlanetInfoData[9].mRotationSpeed = 7.0f;
-        gPlanetInfoData[9].mTranslationMat = mat4::translation(vec3(90.0f, 0, 0));
-        gPlanetInfoData[9].mScaleMat = mat4::scale(vec3(1.0f));
-        gPlanetInfoData[9].mColor = vec4(0.45f, 0.21f, 0.21f, 1.0f);
-        gPlanetInfoData[9].mMorphingSpeed = 1;
-
-        // Moon
-        gPlanetInfoData[10].mParentIndex = 3;
-        gPlanetInfoData[10].mYOrbitSpeed = 1.0f;
-        gPlanetInfoData[10].mZOrbitSpeed = 200.0f;
-        gPlanetInfoData[10].mRotationSpeed = 27.0f;
-        gPlanetInfoData[10].mTranslationMat = mat4::translation(vec3(5.0f, 0, 0));
-        gPlanetInfoData[10].mScaleMat = mat4::scale(vec3(1));
-        gPlanetInfoData[10].mColor = vec4(0.07f, 0.07f, 0.13f, 1.0f);
-        gPlanetInfoData[10].mMorphingSpeed = 1;
 
         CameraMotionParameters cmp{ 160.0f, 600.0f, 200.0f };
         vec3                   camPos{ 48.0f, 48.0f, 20.0f };
@@ -580,19 +457,12 @@ public:
         for (uint32_t i = 0; i < gDataBufferCount; ++i)
         {
             removeResource(pProjViewUniformBuffer[i]);
-            removeResource(pSkyboxUniformBuffer[i]);
+            //removeResource(pSkyboxUniformBuffer[i]);
             if (pRenderer->pProperties->mPipelineStatsQueries)
             {
                 removeQueryPool(pRenderer, pPipelineStatsQueryPool[i]);
             }
         }
-
-        removeResource(pSkyBoxVertexBuffer);
-
-        for (uint i = 0; i < 6; ++i)
-            removeResource(pSkyBoxTextures[i]);
-
-        removeSampler(pRenderer, pSamplerSkyBox);
 
         removeGpuCmdRing(pRenderer, &gGraphicsCmdRing);
         removeSemaphore(pRenderer, pImageAcquiredSemaphore);
@@ -628,7 +498,6 @@ public:
         if (pReloadDesc->mType & (RELOAD_TYPE_SHADER | RELOAD_TYPE_RENDERTARGET))
         {
             
-            //generate_complex_mesh();
             addPipelines();
         }
 
@@ -663,8 +532,8 @@ public:
         if (pReloadDesc->mType & (RELOAD_TYPE_SHADER | RELOAD_TYPE_RENDERTARGET))
         {
             removePipelines();
-            removeResource(pSphereVertexBuffer);
-            removeResource(pSphereIndexBuffer);
+            //removeResource(pSphereVertexBuffer);
+            //removeResource(pSphereIndexBuffer);
         }
 
         if (pReloadDesc->mType & (RELOAD_TYPE_RESIZE | RELOAD_TYPE_RENDERTARGET))
@@ -702,48 +571,9 @@ public:
         CameraMatrix projMat = CameraMatrix::perspectiveReverseZ(horizontal_fov, aspectInverse, 0.1f, 1000.0f);
         gUniformData.mProjectView = projMat * viewMat;
 
-        // point light parameters
-        gUniformData.mLightPosition = vec3(0, 0, 0);
-        gUniformData.mLightColor = vec3(0.9f, 0.9f, 0.7f); // Pale Yellow
-
-        // update planet transformations
-        for (unsigned int i = 0; i < gNumPlanets; i++)
-        {
-            mat4 rotSelf, rotOrbitY, rotOrbitZ, trans, scale, parentMat;
-            rotSelf = rotOrbitY = rotOrbitZ = parentMat = mat4::identity();
-            if (gPlanetInfoData[i].mRotationSpeed > 0.0f)
-                rotSelf = mat4::rotationY(gRotSelfScale * (currentTime + gTimeOffset) / gPlanetInfoData[i].mRotationSpeed);
-            if (gPlanetInfoData[i].mYOrbitSpeed > 0.0f)
-                rotOrbitY = mat4::rotationY(gRotOrbitYScale * (currentTime + gTimeOffset) / gPlanetInfoData[i].mYOrbitSpeed);
-            if (gPlanetInfoData[i].mZOrbitSpeed > 0.0f)
-                rotOrbitZ = mat4::rotationZ(gRotOrbitZScale * (currentTime + gTimeOffset) / gPlanetInfoData[i].mZOrbitSpeed);
-            if (gPlanetInfoData[i].mParentIndex > 0)
-                parentMat = gPlanetInfoData[gPlanetInfoData[i].mParentIndex].mSharedMat;
-
-            trans = gPlanetInfoData[i].mTranslationMat;
-            scale = gPlanetInfoData[i].mScaleMat;
-
-            scale[0][0] /= 2;
-            scale[1][1] /= 2;
-            scale[2][2] /= 2;
-
-            gPlanetInfoData[i].mSharedMat = parentMat * rotOrbitY * trans;
-            gUniformData.mToWorldMat[i] = parentMat * rotOrbitY * rotOrbitZ * trans * rotSelf * scale;
-            gUniformData.mColor[i] = gPlanetInfoData[i].mColor;
-
-            float step;
-            float phase = modf(currentTime * gPlanetInfoData[i].mMorphingSpeed / 2000.f, &step);
-            if (phase > 0.5f)
-                phase = 2 - phase * 2;
-            else
-                phase = phase * 2;
-
-            gUniformData.mGeometryWeight[i][0] = phase;
-        }
-
         viewMat.setTranslation(vec3(0));
-        gUniformDataSky = {};
-        gUniformDataSky.mProjectView = projMat * viewMat;
+        //gUniformDataSky = {};
+        //gUniformDataSky.mProjectView = projMat * viewMat;
     }
 
     void Draw()
@@ -771,11 +601,6 @@ public:
         beginUpdateResource(&viewProjCbv);
         memcpy(viewProjCbv.pMappedData, &gUniformData, sizeof(gUniformData));
         endUpdateResource(&viewProjCbv);
-
-        BufferUpdateDesc skyboxViewProjCbv = { pSkyboxUniformBuffer[gFrameIndex] };
-        beginUpdateResource(&skyboxViewProjCbv);
-        memcpy(skyboxViewProjCbv.pMappedData, &gUniformDataSky, sizeof(gUniformDataSky));
-        endUpdateResource(&skyboxViewProjCbv);
 
         // Reset cmd pool for this frame
         resetCmdPool(pRenderer, elem.pCmdPool);
@@ -834,27 +659,22 @@ public:
         cmdSetViewport(cmd, 0.0f, 0.0f, (float)pRenderTarget->mWidth, (float)pRenderTarget->mHeight, 0.0f, 1.0f);
         cmdSetScissor(cmd, 0, 0, pRenderTarget->mWidth, pRenderTarget->mHeight);
 
-        const uint32_t skyboxVbStride = sizeof(float) * 4;
-        // draw skybox
-        cmdBeginGpuTimestampQuery(cmd, gGpuProfileToken, "Draw Skybox");
+        //const uint32_t skyboxVbStride = sizeof(float) * 4;
+        //// draw skybox
+        cmdBeginGpuTimestampQuery(cmd, gGpuProfileToken, "Draw Gaussian Points");
         cmdSetViewport(cmd, 0.0f, 0.0f, (float)pRenderTarget->mWidth, (float)pRenderTarget->mHeight, 1.0f, 1.0f);
-        cmdBindPipeline(cmd, pSkyBoxDrawPipeline);
-        cmdBindDescriptorSet(cmd, 0, pDescriptorSetTexture);
+        cmdBindPipeline(cmd, pParticlePipeline);
         cmdBindDescriptorSet(cmd, gFrameIndex * 2 + 0, pDescriptorSetUniforms);
-        cmdBindVertexBuffer(cmd, 1, &pSkyBoxVertexBuffer, &skyboxVbStride, NULL);
-        cmdDraw(cmd, 36, 0);
+        {
+            Buffer* bufferArgs[2] = {pGaussianPosition, pGaussianColor};
+            uint32_t strideArgs[2] = {sizeof(float3), sizeof(float3)};
+            cmdBindVertexBuffer(cmd, 2, bufferArgs, strideArgs, NULL);
+        }
+        cmdDraw(cmd, mNumOfPoints, 0);
+        
         cmdSetViewport(cmd, 0.0f, 0.0f, (float)pRenderTarget->mWidth, (float)pRenderTarget->mHeight, 0.0f, 1.0f);
         cmdEndGpuTimestampQuery(cmd, gGpuProfileToken);
 
-        cmdBeginGpuTimestampQuery(cmd, gGpuProfileToken, "Draw Planets");
-
-        cmdBindPipeline(cmd, pSpherePipeline);
-        cmdBindDescriptorSet(cmd, gFrameIndex * 2 + 1, pDescriptorSetUniforms);
-        cmdBindVertexBuffer(cmd, 1, &pSphereVertexBuffer, &gSphereVertexLayout.mBindings[0].mStride, nullptr);
-        cmdBindIndexBuffer(cmd, pSphereIndexBuffer, INDEX_TYPE_UINT16, 0);
-
-        cmdDrawIndexedInstanced(cmd, gSphereIndexCount, 0, gNumPlanets, 0, 0);
-        cmdEndGpuTimestampQuery(cmd, gGpuProfileToken);
         cmdEndGpuTimestampQuery(cmd, gGpuProfileToken); // Draw Skybox/Planets
         cmdBindRenderTargets(cmd, NULL);
 
@@ -970,15 +790,12 @@ public:
 
     void addDescriptorSets()
     {
-        DescriptorSetDesc desc = { pRootSignature, DESCRIPTOR_UPDATE_FREQ_NONE, 1 };
-        addDescriptorSet(pRenderer, &desc, &pDescriptorSetTexture);
-        desc = { pRootSignature, DESCRIPTOR_UPDATE_FREQ_PER_FRAME, gDataBufferCount * 2 };
+        DescriptorSetDesc desc = { pRootSignature, DESCRIPTOR_UPDATE_FREQ_PER_FRAME, gDataBufferCount * 2 };
         addDescriptorSet(pRenderer, &desc, &pDescriptorSetUniforms);
     }
 
     void removeDescriptorSets()
     {
-        removeDescriptorSet(pRenderer, pDescriptorSetTexture);
         removeDescriptorSet(pRenderer, pDescriptorSetUniforms);
     }
 
@@ -986,8 +803,7 @@ public:
     {
         Shader*  shaders[2];
         uint32_t shadersCount = 0;
-        shaders[shadersCount++] = pSphereShader;
-        shaders[shadersCount++] = pSkyBoxDrawShader;
+        shaders[shadersCount++] = pParticleShader;
 
         RootSignatureDesc rootDesc = {};
         rootDesc.mShaderCount = shadersCount;
@@ -999,105 +815,74 @@ public:
 
     void addShaders()
     {
-        ShaderLoadDesc skyShader = {};
-        skyShader.mStages[0].pFileName = "skybox.vert";
-        skyShader.mStages[1].pFileName = "skybox.frag";
 
-        ShaderLoadDesc basicShader = {};
-        basicShader.mStages[0].pFileName = "basic.vert";
-        basicShader.mStages[1].pFileName = "basic.frag";
-
-        addShader(pRenderer, &skyShader, &pSkyBoxDrawShader);
-        addShader(pRenderer, &basicShader, &pSphereShader);
+        ShaderLoadDesc particleShader = {};
+        particleShader.mStages[0].pFileName = "particle.vert";
+        particleShader.mStages[1].pFileName = "particle.frag";
+        addShader(pRenderer, &particleShader, &pParticleShader);
     }
 
-    void removeShaders()
-    {
-        removeShader(pRenderer, pSphereShader);
-        removeShader(pRenderer, pSkyBoxDrawShader);
-    }
+    void removeShaders() { removeShader(pRenderer, pParticleShader); }
 
-    void addPipelines()
-    {
-        RasterizerStateDesc rasterizerStateDesc = {};
-        rasterizerStateDesc.mCullMode = CULL_MODE_NONE;
+    void addPipelines() {
 
-        RasterizerStateDesc sphereRasterizerStateDesc = {};
-        sphereRasterizerStateDesc.mCullMode = CULL_MODE_FRONT;
+        {
+            RasterizerStateDesc rasterizerStateDesc = {};
+            rasterizerStateDesc.mCullMode = CULL_MODE_NONE;
 
-        DepthStateDesc depthStateDesc = {};
-        depthStateDesc.mDepthTest = true;
-        depthStateDesc.mDepthWrite = true;
-        depthStateDesc.mDepthFunc = CMP_GEQUAL;
+            DepthStateDesc depthStateDesc = {};
+            depthStateDesc.mDepthTest = true;
+            depthStateDesc.mDepthWrite = false;
+            depthStateDesc.mDepthFunc = CMP_GEQUAL;
 
-        PipelineDesc desc = {};
-        desc.mType = PIPELINE_TYPE_GRAPHICS;
-        GraphicsPipelineDesc& pipelineSettings = desc.mGraphicsDesc;
-        pipelineSettings.mPrimitiveTopo = PRIMITIVE_TOPO_TRI_LIST;
-        pipelineSettings.mRenderTargetCount = 1;
-        pipelineSettings.pDepthState = &depthStateDesc;
-        pipelineSettings.pColorFormats = &pSwapChain->ppRenderTargets[0]->mFormat;
-        pipelineSettings.mSampleCount = pSwapChain->ppRenderTargets[0]->mSampleCount;
-        pipelineSettings.mSampleQuality = pSwapChain->ppRenderTargets[0]->mSampleQuality;
-        pipelineSettings.mDepthStencilFormat = pDepthBuffer->mFormat;
-        pipelineSettings.pRootSignature = pRootSignature;
-        pipelineSettings.pShaderProgram = pSphereShader;
-        pipelineSettings.pVertexLayout = &gSphereVertexLayout;
-        pipelineSettings.pRasterizerState = &sphereRasterizerStateDesc;
-        pipelineSettings.mVRFoveatedRendering = true;
-        addPipeline(pRenderer, &desc, &pSpherePipeline);
+            VertexLayout vertexLayout = { 0 };
+            vertexLayout.mBindingCount = 2;
+            vertexLayout.mAttribCount = 2;
+            vertexLayout.mBindings[0].mStride = sizeof(struct Tf32x3_s);
+            vertexLayout.mBindings[1].mStride = sizeof(struct Tf32x3_s);
+            vertexLayout.mAttribs[0].mSemantic = SEMANTIC_POSITION;
+            vertexLayout.mAttribs[0].mFormat = TinyImageFormat_R32G32B32_SFLOAT;
+            vertexLayout.mAttribs[0].mBinding = 0;
+            vertexLayout.mAttribs[0].mLocation = 0;
+            vertexLayout.mAttribs[0].mOffset = 0;
 
-        // layout and pipeline for skybox draw
-        VertexLayout vertexLayout = {};
-        vertexLayout.mBindingCount = 1;
-        vertexLayout.mBindings[0].mStride = sizeof(float4);
-        vertexLayout.mAttribCount = 1;
-        vertexLayout.mAttribs[0].mSemantic = SEMANTIC_POSITION;
-        vertexLayout.mAttribs[0].mFormat = TinyImageFormat_R32G32B32A32_SFLOAT;
-        vertexLayout.mAttribs[0].mBinding = 0;
-        vertexLayout.mAttribs[0].mLocation = 0;
-        vertexLayout.mAttribs[0].mOffset = 0;
-        pipelineSettings.pVertexLayout = &vertexLayout;
+            vertexLayout.mAttribs[1].mSemantic = SEMANTIC_COLOR;
+            vertexLayout.mAttribs[1].mFormat = TinyImageFormat_R32G32B32A32_SFLOAT;
+            vertexLayout.mAttribs[1].mBinding = 1;
+            vertexLayout.mAttribs[1].mLocation = 1;
+            vertexLayout.mAttribs[1].mOffset = 0;
 
-        pipelineSettings.pDepthState = NULL;
-        pipelineSettings.pRasterizerState = &rasterizerStateDesc;
-        pipelineSettings.pShaderProgram = pSkyBoxDrawShader; //-V519
-        addPipeline(pRenderer, &desc, &pSkyBoxDrawPipeline);
+            PipelineDesc desc = {};
+            desc.mType = PIPELINE_TYPE_GRAPHICS;
+            GraphicsPipelineDesc& pipelineSettings = desc.mGraphicsDesc;
+            pipelineSettings.mPrimitiveTopo = PRIMITIVE_TOPO_POINT_LIST;
+            pipelineSettings.mRenderTargetCount = 1;
+            pipelineSettings.pDepthState = &depthStateDesc;
+            pipelineSettings.pColorFormats = &pSwapChain->ppRenderTargets[0]->mFormat;
+            pipelineSettings.mSampleCount = pSwapChain->ppRenderTargets[0]->mSampleCount;
+            pipelineSettings.mSampleQuality = pSwapChain->ppRenderTargets[0]->mSampleQuality;
+            pipelineSettings.mDepthStencilFormat = pDepthBuffer->mFormat;
+            pipelineSettings.pRootSignature = pRootSignature;
+            pipelineSettings.pShaderProgram = pParticleShader;
+            pipelineSettings.pVertexLayout = &vertexLayout;
+            pipelineSettings.pRasterizerState = &rasterizerStateDesc;
+            pipelineSettings.mVRFoveatedRendering = true;
+            addPipeline(pRenderer, &desc, &pParticlePipeline);
+        }
+
     }
 
     void removePipelines()
     {
-        removePipeline(pRenderer, pSkyBoxDrawPipeline);
-        removePipeline(pRenderer, pSpherePipeline);
+        //removePipeline(pRenderer, pSkyBoxDrawPipeline);
+        removePipeline(pRenderer, pParticlePipeline);
     }
 
     void prepareDescriptorSets()
     {
-        // Prepare descriptor sets
-        DescriptorData params[7] = {};
-        params[0].pName = "RightText";
-        params[0].ppTextures = &pSkyBoxTextures[0];
-        params[1].pName = "LeftText";
-        params[1].ppTextures = &pSkyBoxTextures[1];
-        params[2].pName = "TopText";
-        params[2].ppTextures = &pSkyBoxTextures[2];
-        params[3].pName = "BotText";
-        params[3].ppTextures = &pSkyBoxTextures[3];
-        params[4].pName = "FrontText";
-        params[4].ppTextures = &pSkyBoxTextures[4];
-        params[5].pName = "BackText";
-        params[5].ppTextures = &pSkyBoxTextures[5];
-        params[6].pName = "uSampler0";
-        params[6].ppSamplers = &pSamplerSkyBox;
-        updateDescriptorSet(pRenderer, 0, pDescriptorSetTexture, 7, params);
-
         for (uint32_t i = 0; i < gDataBufferCount; ++i)
         {
             DescriptorData params[1] = {};
-            params[0].pName = "uniformBlock";
-            params[0].ppBuffers = &pSkyboxUniformBuffer[i];
-            updateDescriptorSet(pRenderer, i * 2 + 0, pDescriptorSetUniforms, 1, params);
-
             params[0].pName = "uniformBlock";
             params[0].ppBuffers = &pProjViewUniformBuffer[i];
             updateDescriptorSet(pRenderer, i * 2 + 1, pDescriptorSetUniforms, 1, params);
