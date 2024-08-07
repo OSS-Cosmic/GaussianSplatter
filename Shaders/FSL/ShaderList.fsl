@@ -3,8 +3,9 @@
 #include "particle.frag.fsl"
 #end
 
-#vert FT_VDP FT_MULTIVIEW particle.vert 
-#include "skybox.vert.fsl"
+#vert FT_MULTIVIEW particle.vert 
+#include "particle.vert.fsl"
 #end
+
 
 

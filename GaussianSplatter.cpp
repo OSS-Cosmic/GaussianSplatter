@@ -26,7 +26,6 @@
 // Tests the basic mat4 transformations, such as scaling, rotation, and translation.
 
 #include <cstdint>
-#define MAX_PLANETS 20 // Does not affect test, just for allocating space in uniform block. Must match with shader.
 
 // Interfaces
 #include "Common_3/Application/Interfaces/IApp.h"
@@ -213,34 +212,37 @@ public:
             for(size_t pIdx = 0; pIdx < mNumOfPoints; pIdx++) {
                 //GaussianPoint point;
                 GaussianPoint* point = &gGaussianPoints[pIdx];
-                
-                uint64_t      pointId;
-                Tf64x3_s pos; 
-                Tu8x3_s color;
-                double        error;
-                uint64_t      trackLength;
 
-                if(fsReadFromStream(&fh, &pointId, sizeof(pointId)) != sizeof(pointId)) return false;
-                if(fsReadFromStream(&fh, &pos, sizeof(pos)) != sizeof(pos)) return false;
-                if(fsReadFromStream(&fh, &color, sizeof(color)) != sizeof(color)) return false;
-                if(fsReadFromStream(&fh, &error, sizeof(error)) != sizeof(error)) return false;
-                if(fsReadFromStream(&fh, &trackLength, sizeof(trackLength)) != sizeof(trackLength)) return false;
+                uint64_t pointId;
+                Tf64x3_s pos;
+                Tu8x3_s  color;
+                double   error;
+                uint64_t trackLength;
+
+                if (fsReadFromStream(&fh, &pointId, sizeof(pointId)) != sizeof(pointId))
+                    return false;
+                if (fsReadFromStream(&fh, &pos, sizeof(pos)) != sizeof(pos))
+                    return false;
+                if (fsReadFromStream(&fh, &color, sizeof(color)) != sizeof(color))
+                    return false;
+                if (fsReadFromStream(&fh, &error, sizeof(error)) != sizeof(error))
+                    return false;
+                if (fsReadFromStream(&fh, &trackLength, sizeof(trackLength)) != sizeof(trackLength))
+                    return false;
                 point->mPointId = pointId;
                 point->mPos = { (float)pos.x, (float)pos.y, (float)pos.z };
                 point->mColor = { ((float)color.x / 255.0f), ((float)color.y / 255.0f), ((float)color.z / 255.0f) };
                 point->mTrackLength = trackLength;
                 point->mError = error;
-                gGaussianPoints[pIdx].mPointIds = (int *)tf_malloc(sizeof(int) * trackLength);
-                gGaussianPoints[pIdx].mImageIds = (int *)tf_malloc(sizeof(int) * trackLength);
+                gGaussianPoints[pIdx].mPointIds = (int*)tf_malloc(sizeof(int) * trackLength);
+                gGaussianPoints[pIdx].mImageIds = (int*)tf_malloc(sizeof(int) * trackLength);
                 for (size_t tIdx = 0; tIdx < trackLength; tIdx++) {
                     int image_idx;
                     int point2d_idx;
-                    if (fsReadFromStream(&fh, &image_idx, sizeof(image_idx)) !=
-                        sizeof(image_idx))
-                      return false;
-                    if (fsReadFromStream(&fh, &point2d_idx, sizeof(point2d_idx)) !=
-                        sizeof(point2d_idx))
-                      return false;
+                    if (fsReadFromStream(&fh, &image_idx, sizeof(image_idx)) != sizeof(image_idx))
+                        return false;
+                    if (fsReadFromStream(&fh, &point2d_idx, sizeof(point2d_idx)) != sizeof(point2d_idx))
+                        return false;
                     gGaussianPoints[pIdx].mPointIds[tIdx] = point2d_idx;
                     gGaussianPoints[pIdx].mImageIds[tIdx] = image_idx;
                 }
@@ -501,7 +503,13 @@ public:
             addPipelines();
         }
 
-        prepareDescriptorSets();
+        for (uint32_t i = 0; i < gDataBufferCount; ++i)
+        {
+            DescriptorData params[1] = {};
+            params[0].pName = "uniformBlock";
+            params[0].ppBuffers = &pProjViewUniformBuffer[i];
+            updateDescriptorSet(pRenderer, i, pDescriptorSetUniforms, 1, params);
+        }
 
         UserInterfaceLoadDesc uiLoad = {};
         uiLoad.mColorFormat = pSwapChain->ppRenderTargets[0]->mFormat;
@@ -663,13 +671,13 @@ public:
         //// draw skybox
         cmdBeginGpuTimestampQuery(cmd, gGpuProfileToken, "Draw Gaussian Points");
         cmdSetViewport(cmd, 0.0f, 0.0f, (float)pRenderTarget->mWidth, (float)pRenderTarget->mHeight, 1.0f, 1.0f);
-        cmdBindPipeline(cmd, pParticlePipeline);
-        cmdBindDescriptorSet(cmd, gFrameIndex * 2 + 0, pDescriptorSetUniforms);
+        cmdBindDescriptorSet(cmd, gFrameIndex, pDescriptorSetUniforms);
         {
-            Buffer* bufferArgs[2] = {pGaussianPosition, pGaussianColor};
-            uint32_t strideArgs[2] = {sizeof(float3), sizeof(float3)};
+            Buffer*  bufferArgs[2] = { pGaussianPosition, pGaussianColor };
+            uint32_t strideArgs[2] = { sizeof(struct Tf32x3_s), sizeof(struct Tf32x3_s) };
             cmdBindVertexBuffer(cmd, 2, bufferArgs, strideArgs, NULL);
         }
+        cmdBindPipeline(cmd, pParticlePipeline);
         cmdDraw(cmd, mNumOfPoints, 0);
         
         cmdSetViewport(cmd, 0.0f, 0.0f, (float)pRenderTarget->mWidth, (float)pRenderTarget->mHeight, 0.0f, 1.0f);
@@ -835,19 +843,20 @@ public:
             depthStateDesc.mDepthWrite = false;
             depthStateDesc.mDepthFunc = CMP_GEQUAL;
 
-            VertexLayout vertexLayout = { 0 };
+            VertexLayout vertexLayout = {};
             vertexLayout.mBindingCount = 2;
             vertexLayout.mAttribCount = 2;
             vertexLayout.mBindings[0].mStride = sizeof(struct Tf32x3_s);
             vertexLayout.mBindings[1].mStride = sizeof(struct Tf32x3_s);
+
             vertexLayout.mAttribs[0].mSemantic = SEMANTIC_POSITION;
             vertexLayout.mAttribs[0].mFormat = TinyImageFormat_R32G32B32_SFLOAT;
             vertexLayout.mAttribs[0].mBinding = 0;
             vertexLayout.mAttribs[0].mLocation = 0;
             vertexLayout.mAttribs[0].mOffset = 0;
 
-            vertexLayout.mAttribs[1].mSemantic = SEMANTIC_COLOR;
-            vertexLayout.mAttribs[1].mFormat = TinyImageFormat_R32G32B32A32_SFLOAT;
+            vertexLayout.mAttribs[1].mSemantic = SEMANTIC_TEXCOORD0;
+            vertexLayout.mAttribs[1].mFormat = TinyImageFormat_R32G32B32_SFLOAT;
             vertexLayout.mAttribs[1].mBinding = 1;
             vertexLayout.mAttribs[1].mLocation = 1;
             vertexLayout.mAttribs[1].mOffset = 0;
@@ -876,17 +885,6 @@ public:
     {
         //removePipeline(pRenderer, pSkyBoxDrawPipeline);
         removePipeline(pRenderer, pParticlePipeline);
-    }
-
-    void prepareDescriptorSets()
-    {
-        for (uint32_t i = 0; i < gDataBufferCount; ++i)
-        {
-            DescriptorData params[1] = {};
-            params[0].pName = "uniformBlock";
-            params[0].ppBuffers = &pProjViewUniformBuffer[i];
-            updateDescriptorSet(pRenderer, i * 2 + 1, pDescriptorSetUniforms, 1, params);
-        }
     }
 };
 DEFINE_APPLICATION_MAIN(Transformations)

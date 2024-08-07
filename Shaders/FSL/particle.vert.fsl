@@ -32,9 +32,9 @@ STRUCT(VSInput)
 
 STRUCT(VSOutput)
 {
+	DATA(float, PointSize, SV_PointSize);
 	DATA(float4, Position, SV_Position);
 	DATA(float4, Color, COLOR);
-	DATA(float, PointSize, SV_PointSize);
 };
 
 
@@ -43,13 +43,14 @@ VSOutput VS_MAIN( VSInput In )
     INIT_MAIN;
     VSOutput Out;
 
+  Out.Color = float4(In.Color.rgb, 1.0);
+  Out.PointSize = 1.0;
+
   #if FT_MULTIVIEW
-    Out.Position = mul(Get(mvp)[VR_VIEW_ID], In.Position);
+    Out.Position = mul(Get(mvp)[VR_VIEW_ID], float4(In.Position, 1.0));
   #else
-    Out.Position = mul(Get(mvp), In.Position);
+    Out.Position = mul(Get(mvp), float4(In.Position, 1.0));
   #endif
-    Out.Color = float4(In.Color.rgb, 1.0);
-    Out.PointSize = 1.0f;
 
     RETURN(Out);
 }
