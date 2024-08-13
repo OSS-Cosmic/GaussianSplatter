@@ -36,10 +36,12 @@
 #include "Common_3/Application/Interfaces/IScreenshot.h"
 #include "Common_3/Application/Interfaces/IUI.h"
 #include "Forge/TF_FileSystem.h"
+#include "Forge/Formats/ply/TF_ply.h"
 #include "Forge/TF_Log.h"
 #include "Forge/Core/TF_Time.h"
 
 #include "Forge/Math/TF_Types.h"
+#include "Forge/Math/TF_Simd32x4.h"
 
 #include "Common_3/Utilities/RingBuffer.h"
 
@@ -52,6 +54,7 @@
 #include "Forge/Graphics/TF_GPUConfig.h"
 
 #include "Forge/Mem/TF_Memory.h"
+#include "TF/Forge/Math/TF_FastHash.h"
 
 ///// Demo structures
 //struct PlanetInfoStruct
@@ -71,6 +74,7 @@ struct UniformBlock
 {
     CameraMatrix mProjectView;
 };
+uint64_t mNumOfPoints;
 
 //struct UniformBlockSky
 //{
@@ -83,6 +87,25 @@ const uint     gTimeOffset = 600000; // For visually better starting locations
 const float    gRotSelfScale = 0.0004f;
 const float    gRotOrbitYScale = 0.001f;
 const float    gRotOrbitZScale = 0.00001f;
+
+const hash32_t gPycFeaturesReset[] = {
+    tfStrHash32(tfCToStrRef("f_rest_0")),  tfStrHash32(tfCToStrRef("f_rest_1")),  tfStrHash32(tfCToStrRef("f_rest_2")),
+    tfStrHash32(tfCToStrRef("f_rest_3")),  tfStrHash32(tfCToStrRef("f_rest_4")),  tfStrHash32(tfCToStrRef("f_rest_5")),
+    tfStrHash32(tfCToStrRef("f_rest_6")),  tfStrHash32(tfCToStrRef("f_rest_7")),  tfStrHash32(tfCToStrRef("f_rest_8")),
+    tfStrHash32(tfCToStrRef("f_rest_9")),  tfStrHash32(tfCToStrRef("f_rest_10")), tfStrHash32(tfCToStrRef("f_rest_11")),
+    tfStrHash32(tfCToStrRef("f_rest_12")), tfStrHash32(tfCToStrRef("f_rest_13")), tfStrHash32(tfCToStrRef("f_rest_14")),
+    tfStrHash32(tfCToStrRef("f_rest_15")), tfStrHash32(tfCToStrRef("f_rest_16")), tfStrHash32(tfCToStrRef("f_rest_17")),
+    tfStrHash32(tfCToStrRef("f_rest_18")), tfStrHash32(tfCToStrRef("f_rest_19")), tfStrHash32(tfCToStrRef("f_rest_20")),
+    tfStrHash32(tfCToStrRef("f_rest_21")), tfStrHash32(tfCToStrRef("f_rest_22")), tfStrHash32(tfCToStrRef("f_rest_23")),
+    tfStrHash32(tfCToStrRef("f_rest_24")), tfStrHash32(tfCToStrRef("f_rest_25")), tfStrHash32(tfCToStrRef("f_rest_26")),
+    tfStrHash32(tfCToStrRef("f_rest_27")), tfStrHash32(tfCToStrRef("f_rest_28")), tfStrHash32(tfCToStrRef("f_rest_29")),
+    tfStrHash32(tfCToStrRef("f_rest_30")), tfStrHash32(tfCToStrRef("f_rest_31")), tfStrHash32(tfCToStrRef("f_rest_32")),
+    tfStrHash32(tfCToStrRef("f_rest_33")), tfStrHash32(tfCToStrRef("f_rest_34")), tfStrHash32(tfCToStrRef("f_rest_35")),
+    tfStrHash32(tfCToStrRef("f_rest_36")), tfStrHash32(tfCToStrRef("f_rest_37")), tfStrHash32(tfCToStrRef("f_rest_38")),
+    tfStrHash32(tfCToStrRef("f_rest_39")), tfStrHash32(tfCToStrRef("f_rest_40")), tfStrHash32(tfCToStrRef("f_rest_41")),
+    tfStrHash32(tfCToStrRef("f_rest_42")), tfStrHash32(tfCToStrRef("f_rest_43")), tfStrHash32(tfCToStrRef("f_rest_44")),
+};
+const uint32_t gFeatureReset = TF_ARRAY_COUNT(gPycFeaturesReset) / 3;
 
 RendererContext* pContext = NULL;
 Renderer*        pRenderer = NULL;
@@ -99,6 +122,7 @@ Pipeline* pParticlePipeline = NULL;
 
 RootSignature* pRootSignature = NULL;
 Buffer* pGaussianPosition = NULL;
+Buffer* pFeatureRest = NULL;
 Buffer* pGaussianColor = NULL;
 Buffer* pProjViewUniformBuffer[gDataBufferCount] = { NULL };
 
@@ -116,17 +140,10 @@ uint32_t gFontID = 0;
 QueryPool* pPipelineStatsQueryPool[gDataBufferCount] = {};
 
 FontDrawDesc gFrameTimeDraw;
-struct GaussianPoint {
-  uint64_t mPointId;
-  Tf32x3_s mPos;
-  Tf32x3_s mColor;
-  double mError;
-  uint64_t mTrackLength;
-  int* mPointIds;
-  int* mImageIds;
-};
-uint64_t mNumOfPoints;
-struct GaussianPoint* gGaussianPoints = NULL; 
+
+Tsimd_f32x4_t* pPointPos;
+Tsimd_f32x4_t* pPointColor;
+
 
 static unsigned char gPipelineStatsCharArray[2048] = {};
 static bstring       gPipelineStats = bfromarr(gPipelineStatsCharArray);
@@ -135,6 +152,69 @@ void reloadRequest(void*)
 {
     ReloadDesc reload{ RELOAD_TYPE_SHADER };
     requestReload(&reload);
+}
+
+
+struct TPlyArgs4x4_s {
+    TStrSpan mCol0[4];
+    TStrSpan mCol1[4];
+    TStrSpan mCol2[4];
+    TStrSpan mCol3[4];
+};
+static inline bool plyUtilReadf32x3(FileStream* stream, struct TPlyReader* reader, size_t cursor, struct TPlyElement* element,
+                                 hash32_t args[3], struct Tf32x3_s* value); 
+//static inline bool plyUtilReadf32x4x4(FileStream* stream, struct TPlyReader* reader, size_t cursor, struct TPlyElement* element,
+//                                struct TPlyArgs4x4_s args, struct Tf32x4x4_s* value);
+static inline bool plyUtilReadf32x4(FileStream* stream, struct TPlyReader* reader, size_t cursor, struct TPlyElement* element,
+                                 hash32_t args[4], struct Tf32x4_s* value);
+
+//static inline bool plyUtilReadf32x4x4(FileStream* stream, struct TPlyReader* reader, size_t cursor, struct TPlyElement* element,
+//                                struct TPlyArgs4x4_s args, struct Tf32x4x4_s* value) {
+//    struct TPlyAttribResult findAttrib;
+//    struct TPlyNumber       number;
+//    for (size_t i = 0; i < 3; i++) {
+//        if (!plyUtilReadf32x4(stream, reader, cursor, element, args.mCol0, &value->mCol0))
+//            return false;
+//        if (!plyUtilReadf32x4(stream, reader, cursor, element, args.mCol0, &value->mCol1))
+//            return false;
+//        if (!plyUtilReadf32x4(stream, reader, cursor, element, args.mCol0, &value->mCol2))
+//            return false;
+//        if (!plyUtilReadf32x4(stream, reader, cursor, element, args.mCol0, &value->mCol3))
+//            return false;
+//    }
+//
+//    return true;
+//}
+
+
+static inline bool plyUtilReadf32x4(FileStream* stream, struct TPlyReader* reader, size_t cursor, struct TPlyElement* element,
+                                 hash32_t args[4], struct Tf32x4_s* value) {
+    struct TPlyAttribResult findAttrib;
+    struct TPlyNumber       number;
+    for (size_t i = 0; i < 4; i++) {
+        if (!tfPlyFindAttribRef(stream, reader, cursor, element, args[i], &findAttrib))
+            return false;
+        if (!tfPlyDecodeNumber(stream, findAttrib.mCursor, reader->mFormat, findAttrib.mType, &number))
+            return false;
+        value->v[i] = number.flt;
+    }
+
+    return true;
+}
+
+
+static inline bool plyUtilReadf32x3(FileStream* stream, struct TPlyReader* reader, size_t cursor, struct TPlyElement* element,
+                                 hash32_t args[3], struct Tf32x3_s* value) {
+    struct TPlyAttribResult findAttrib;
+    struct TPlyNumber       number;
+    for (size_t i = 0; i < 3; i++) {
+        if (!tfPlyFindAttribRef(stream, reader, cursor, element, args[i], &findAttrib))
+            return false;
+        if (!tfPlyDecodeNumber(stream, findAttrib.mCursor, reader->mFormat, findAttrib.mType, &number))
+            return false;
+        value->v[i] = number.flt;
+    }
+    return true;
 }
 
 class Transformations: public IApp
@@ -204,79 +284,223 @@ public:
 
         {
             FileStream fh = {};
-            if (!fsOpenStreamFromPath(RD_OTHER_FILES, "drjohnson/points3D.bin", FM_READ, &fh)) 
-                return false;
-            if(fsReadFromStream(&fh, &mNumOfPoints, sizeof(mNumOfPoints)) != sizeof(mNumOfPoints))
-                return false;
-            gGaussianPoints = (struct GaussianPoint*)tf_malloc(sizeof(GaussianPoint) * mNumOfPoints);
-            for(size_t pIdx = 0; pIdx < mNumOfPoints; pIdx++) {
-                //GaussianPoint point;
-                GaussianPoint* point = &gGaussianPoints[pIdx];
+          
+            //element vertex 1734607
+            //property float x
+            //property float y
+            //property float z
+            //property float nx
+            //property float ny
+            //property float nz
+            //property float f_dc_0
+            //property float f_dc_1
+            //property float f_dc_2
+            //property float f_rest_0
+            //property float f_rest_1
+            //property float f_rest_2
+            //property float f_rest_3
+            //property float f_rest_4
+            //property float f_rest_5
+            //property float f_rest_6
+            //property float f_rest_7
+            //property float f_rest_8
+            //property float f_rest_9
+            //property float f_rest_10
+            //property float f_rest_11
+            //property float f_rest_12
+            //property float f_rest_13
+            //property float f_rest_14
+            //property float f_rest_15
+            //property float f_rest_16
+            //property float f_rest_17
+            //property float f_rest_18
+            //property float f_rest_19
+            //property float f_rest_20
+            //property float f_rest_21
+            //property float f_rest_22
+            //property float f_rest_23
+            //property float f_rest_24
+            //property float f_rest_25
+            //property float f_rest_26
+            //property float f_rest_27
+            //property float f_rest_28
+            //property float f_rest_29
+            //property float f_rest_30
+            //property float f_rest_31
+            //property float f_rest_32
+            //property float f_rest_33
+            //property float f_rest_34
+            //property float f_rest_35
+            //property float f_rest_36
+            //property float f_rest_37
+            //property float f_rest_38
+            //property float f_rest_39
+            //property float f_rest_40
+            //property float f_rest_41
+            //property float f_rest_42
+            //property float f_rest_43
+            //property float f_rest_44
+            //property float opacity
+            //property float scale_0
+            //property float scale_1
+            //property float scale_2
+            //property float rot_0
+            //property float rot_1
+            //property float rot_2
+            //property float rot_3
 
-                uint64_t pointId;
-                Tf64x3_s pos;
-                Tu8x3_s  color;
-                double   error;
-                uint64_t trackLength;
-
-                if (fsReadFromStream(&fh, &pointId, sizeof(pointId)) != sizeof(pointId))
-                    return false;
-                if (fsReadFromStream(&fh, &pos, sizeof(pos)) != sizeof(pos))
-                    return false;
-                if (fsReadFromStream(&fh, &color, sizeof(color)) != sizeof(color))
-                    return false;
-                if (fsReadFromStream(&fh, &error, sizeof(error)) != sizeof(error))
-                    return false;
-                if (fsReadFromStream(&fh, &trackLength, sizeof(trackLength)) != sizeof(trackLength))
-                    return false;
-                point->mPointId = pointId;
-                point->mPos = { (float)pos.x, (float)pos.y, (float)pos.z };
-                point->mColor = { ((float)color.x / 255.0f), ((float)color.y / 255.0f), ((float)color.z / 255.0f) };
-                point->mTrackLength = trackLength;
-                point->mError = error;
-                gGaussianPoints[pIdx].mPointIds = (int*)tf_malloc(sizeof(int) * trackLength);
-                gGaussianPoints[pIdx].mImageIds = (int*)tf_malloc(sizeof(int) * trackLength);
-                for (size_t tIdx = 0; tIdx < trackLength; tIdx++) {
-                    int image_idx;
-                    int point2d_idx;
-                    if (fsReadFromStream(&fh, &image_idx, sizeof(image_idx)) != sizeof(image_idx))
-                        return false;
-                    if (fsReadFromStream(&fh, &point2d_idx, sizeof(point2d_idx)) != sizeof(point2d_idx))
-                        return false;
-                    gGaussianPoints[pIdx].mPointIds[tIdx] = point2d_idx;
-                    gGaussianPoints[pIdx].mImageIds[tIdx] = image_idx;
-                }
+            if (!fsOpenStreamFromPath(RD_OTHER_FILES, "drjohnson/point_cloud/iteration_7000/point_cloud.ply", FM_READ, &fh)) 
+                return false;
+            struct TPlyReader reader = {};
+            if(!tfAddPlyFileReader(&fh, &reader)) {
+                LOGF(eERROR, "Failed to load ply.");
+                return false;
             }
+
+            size_t cursor = 0;
+            struct TPlyElement* element;
+            if(!tfPlySeekElementStream(&fh, &reader, tfCToStrRef("vertex"), &element, &cursor)) {
+                LOGF(eERROR, "Failed to find vertex stream.");
+                return false;
+            }
+
+            {
+                BufferLoadDesc positionVbDesc = {};
+                positionVbDesc.mDesc.mDescriptors = DESCRIPTOR_TYPE_VERTEX_BUFFER;
+                positionVbDesc.mDesc.mMemoryUsage = RESOURCE_MEMORY_USAGE_GPU_ONLY;
+                positionVbDesc.mDesc.mSize = sizeof(struct Tf32x3_s) * element->mNumElements;
+                positionVbDesc.ppBuffer = &pGaussianPosition;
+                addResource(&positionVbDesc, NULL);
+            }
+            {
+                BufferLoadDesc positionShDesc = {};
+                positionShDesc.mDesc.mDescriptors = DESCRIPTOR_TYPE_VERTEX_BUFFER;
+                positionShDesc.mDesc.mMemoryUsage = RESOURCE_MEMORY_USAGE_GPU_ONLY;
+                positionShDesc.mDesc.mSize = sizeof(struct Tf32x3_s) * gFeatureReset * element->mNumElements;
+                positionShDesc.ppBuffer = &pFeatureRest;
+                addResource(&positionShDesc, NULL);
+            }
+            {
+                BufferLoadDesc colorVbDesc = {};
+                colorVbDesc.mDesc.mDescriptors = DESCRIPTOR_TYPE_VERTEX_BUFFER;
+                colorVbDesc.mDesc.mMemoryUsage = RESOURCE_MEMORY_USAGE_GPU_ONLY;
+                colorVbDesc.mDesc.mSize = sizeof(struct Tf32x3_s) * element->mNumElements;
+                colorVbDesc.ppBuffer = &pGaussianColor;
+                addResource(&colorVbDesc, NULL);
+            }
+
+            BufferUpdateDesc positionUpdateDesc = { pGaussianPosition };
+            BufferUpdateDesc colorUpdateDesc = { pGaussianColor };
+            BufferUpdateDesc featureUpdateDesc = { pFeatureRest };
+            beginUpdateResource(&positionUpdateDesc);
+            beginUpdateResource(&colorUpdateDesc);
+            beginUpdateResource(&featureUpdateDesc);
+            struct TPlyAttribResult findAttrib;
+            mNumOfPoints = element->mNumElements;
+            for (size_t eleIdx = 0; eleIdx < element->mNumElements; eleIdx++, cursor += tfPlyNextElement(&fh, &reader, cursor, element)) {
+                if(eleIdx % 1000 == 0)
+                LOGF(eINFO, "processing element %lu/%lu", eleIdx, element->mNumElements);
+                struct Tf32x3_s pos;
+                struct TPlyNumber number;
+                hash32_t posArgs[3] = {tfStrHash32(tfCToStrRef("x")), tfStrHash32(tfCToStrRef("y")), tfStrHash32(tfCToStrRef("z"))};
+                if (!plyUtilReadf32x3(&fh, &reader, cursor, element, posArgs, &pos))
+                    return false;
+
+                for (size_t fIdx = 0; fIdx < gFeatureReset; fIdx++) {
+                    struct Tf32x3_s feature;
+                    hash32_t resetArg[3] = {gPycFeaturesReset[(fIdx * 3)], gPycFeaturesReset[(fIdx * 3) + 1], gPycFeaturesReset[(fIdx * 3) + 2]};
+                    if (!plyUtilReadf32x3(&fh, &reader, cursor, element, resetArg, &feature))
+                        return false;
+                    ((Tf32x3_s*)featureUpdateDesc.pMappedData)[(eleIdx * gFeatureReset) + fIdx] = feature;
+                }
+
+                ((Tf32x3_s*)positionUpdateDesc.pMappedData)[eleIdx] = pos;
+                ((Tf32x3_s*)colorUpdateDesc.pMappedData)[eleIdx] = pos;
+            }
+            endUpdateResource(&colorUpdateDesc);
+            endUpdateResource(&positionUpdateDesc);
+            endUpdateResource(&featureUpdateDesc);
+
+            tfFreePlyFileReader(&reader);
+           // gGaussianPoints = (struct GaussianPoint*)tf_malloc(sizeof(GaussianPoint) * mNumOfPoints);
+           // pPointPos = (Tsimd_f32x4_t*)tf_malloc(sizeof(Tsimd_f32x4_t) * mNumOfPoints);
+           // for(size_t pIdx = 0; pIdx < mNumOfPoints; pIdx++) {
+           //     //GaussianPoint point;
+           //     GaussianPoint* point = &gGaussianPoints[pIdx];
+
+           //     uint64_t pointId;
+           //     Tf64x3_s pos;
+           //     Tu8x3_s  color;
+           //     double   error;
+           //     uint64_t trackLength;
+
+           //     if (fsReadFromStream(&fh, &pointId, sizeof(pointId)) != sizeof(pointId)) return false;
+           //     if (fsReadFromStream(&fh, &pos, sizeof(pos)) != sizeof(pos)) return false;
+           //     if (fsReadFromStream(&fh, &color, sizeof(color)) != sizeof(color)) return false;
+           //     if (fsReadFromStream(&fh, &error, sizeof(error)) != sizeof(error)) return false;
+           //     if (fsReadFromStream(&fh, &trackLength, sizeof(trackLength)) != sizeof(trackLength)) return false;
+           //     point->mPointId = pointId;
+           //     point->mPos = { (float)pos.x, (float)pos.y, (float)pos.z };
+           //     point->mColor = { ((float)color.x / 255.0f), ((float)color.y / 255.0f), ((float)color.z / 255.0f) };
+           //     point->mTrackLength = trackLength;
+           //     point->mError = error;
+
+           //     pPointPos[pIdx] = tfSimdLoad_f32x4(pos.x, pos.y, pos.z, 0.0f);
+           //     gGaussianPoints[pIdx].mPointIds = (int*)tf_malloc(sizeof(int) * trackLength);
+           //     gGaussianPoints[pIdx].mImageIds = (int*)tf_malloc(sizeof(int) * trackLength);
+           //     for (size_t tIdx = 0; tIdx < trackLength; tIdx++) {
+           //         int image_idx;
+           //         int point2d_idx;
+           //         if (fsReadFromStream(&fh, &image_idx, sizeof(image_idx)) != sizeof(image_idx))
+           //             return false;
+           //         if (fsReadFromStream(&fh, &point2d_idx, sizeof(point2d_idx)) != sizeof(point2d_idx))
+           //             return false;
+           //         gGaussianPoints[pIdx].mPointIds[tIdx] = point2d_idx;
+           //         gGaussianPoints[pIdx].mImageIds[tIdx] = image_idx;
+           //     }
+           // }
         }
 
-        {
-          {
-            BufferLoadDesc positionVbDesc = {};
-            positionVbDesc.mDesc.mDescriptors = DESCRIPTOR_TYPE_VERTEX_BUFFER;
-            positionVbDesc.mDesc.mMemoryUsage = RESOURCE_MEMORY_USAGE_GPU_ONLY;
-            positionVbDesc.mDesc.mSize = sizeof(struct Tf32x3_s) * mNumOfPoints;
-            positionVbDesc.ppBuffer = &pGaussianPosition;
-            addResource(&positionVbDesc, NULL);
-          }
-          {
-            BufferLoadDesc colorVbDesc = {};
-            colorVbDesc.mDesc.mDescriptors = DESCRIPTOR_TYPE_VERTEX_BUFFER;
-            colorVbDesc.mDesc.mMemoryUsage = RESOURCE_MEMORY_USAGE_GPU_ONLY;
-            colorVbDesc.mDesc.mSize = sizeof(struct Tf32x3_s) * mNumOfPoints;
-            colorVbDesc.ppBuffer = &pGaussianColor;
-            addResource(&colorVbDesc, NULL);
-          }
-          BufferUpdateDesc positionUpdateDesc = {pGaussianPosition};
-          BufferUpdateDesc colorUpdateDesc = {pGaussianColor};
-          beginUpdateResource(&positionUpdateDesc);
-          beginUpdateResource(&colorUpdateDesc);
-          for (size_t i = 0; i < mNumOfPoints; i++) {
-            ((Tf32x3_s*)positionUpdateDesc.pMappedData)[i] = gGaussianPoints[i].mPos;
-            ((Tf32x3_s*)colorUpdateDesc.pMappedData)[i] = gGaussianPoints[i].mColor;
-          }
-          endUpdateResource(&colorUpdateDesc);
-          endUpdateResource(&positionUpdateDesc);
-        }
+       // // calculate scale
+       // {
+       //     Tsimd_f32x4_t globalMin = tfSimdLoad_f32x4(0,0,0,0);
+       //     Tsimd_f32x4_t globalMax = tfSimdLoad_f32x4(0,0,0,0);
+
+       //     for (size_t i = 0; i < mNumOfPoints; i++) {
+       //         globalMax = tfSimdMaxPerElem_f32x4(globalMax, pPointPos[i]);
+       //         globalMin = tfSimdMaxPerElem_f32x4(globalMin, pPointPos[i]);
+       //     }
+
+
+       //     float* calcScale = (float*)tf_malloc(sizeof(float) * mNumOfPoints); 
+       //     for (size_t i = 0; i < mNumOfPoints; i++) {
+       //         float min3[3] = {FLT_MAX, FLT_MAX, FLT_MAX};
+       //         for(size_t ii = 0; ii < mNumOfPoints; ii++) {
+       //             if(ii == i)
+       //                 continue;
+       //             const Tf32x3_s d = {
+       //                 gGaussianPoints[i].mPos.x - gGaussianPoints[ii].mPos.x,
+       //                 gGaussianPoints[i].mPos.y - gGaussianPoints[ii].mPos.y,
+       //                 gGaussianPoints[i].mPos.z - gGaussianPoints[ii].mPos.z,
+       //             };
+       //             const float dist = d.x * d.x + d.y * d.y + d.z * d.z;
+       //             if(dist < min3[0]) {
+       //                 min3[0] = min3[1];
+       //                 min3[1] = min3[2];
+       //                 min3[2] = dist;
+       //             }
+       //         }
+       //         calcScale[i] = (min3[0] + min3[1] + min3[2]) / 3.0f;
+       //     }
+       //     tf_free(calcScale);
+       // }
+
+        //{
+        //  for (size_t i = 0; i < mNumOfPoints; i++) {
+        //    ((Tf32x3_s*)positionUpdateDesc.pMappedData)[i] = gGaussianPoints[i].mPos;
+        //    ((Tf32x3_s*)colorUpdateDesc.pMappedData)[i] = gGaussianPoints[i].mColor;
+        //  }
+        //}
 
         BufferLoadDesc ubDesc = {};
         ubDesc.mDesc.mDescriptors = DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -334,8 +558,8 @@ public:
 
         waitForAllResourceLoads();
 
-        CameraMotionParameters cmp{ 160.0f, 600.0f, 200.0f };
-        vec3                   camPos{ 48.0f, 48.0f, 20.0f };
+        CameraMotionParameters cmp{ 60.0f, 20.0f, 200.0f };
+        vec3                   camPos{ 10.0f, 10.0f, 20.0f };
         vec3                   lookAt{ vec3(0) };
 
         pCameraController = initFpsCameraController(camPos, lookAt);

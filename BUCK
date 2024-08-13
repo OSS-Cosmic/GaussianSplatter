@@ -10,6 +10,7 @@ cxx_binary(
     link_style = "static",
     deps = [
         "@tf//:TF",
+        "@tf//:TF~Ply"
     ],
     extra_shared_deps = tf_default_shared_deps(),
     #_cxx_toolchain = "tf//toolchain:cxx",
@@ -41,9 +42,6 @@ package_app(
               "GPUCfg/gpu.cfg": "//:gpu.cfg",
         } | 
     {paths.relativize(file,"TFSamples-Media/UnitTestResources"): file for file in glob(["TFSamples-Media/UnitTestResources/Fonts/**/*"])} |
-    {paths.join("Other/drjohnson",paths.basename(file)): file for file in glob(["assets/drjohnson/sparse/0/*"])} |
-    {paths.join("Other/playroom",paths.basename(file)): file for file in glob(["assets/playroom/sparse/0/*"])} |
-    {paths.join("Other/sparse",paths.basename(file)): file for file in glob(["assets/train/sparse/0/*"])} |
-    {paths.join("Other/truck",paths.basename(file)): file for file in glob(["assets/truck/sparse/0/*"])}
+    {paths.join("Other",paths.relativize(file, "Models")): file for file in glob(["Models/**/*.ply"])}
 ) 
 
