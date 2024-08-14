@@ -27,8 +27,8 @@
   ignore = .git
 
 [tf]
-  memory-tracking = 1
-  log-level = eAll
-  build = debug
-  fxc = C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64
+memory-tracking = 1 
+log-level = eAll
+build = release 
+fxc = C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64
 

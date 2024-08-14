@@ -88,7 +88,20 @@ const float    gRotSelfScale = 0.0004f;
 const float    gRotOrbitYScale = 0.001f;
 const float    gRotOrbitZScale = 0.00001f;
 
-const hash32_t gPycFeaturesReset[] = {
+struct SphericalHarmonics {
+   Tf32x3_s dc;
+   union {
+       Tf32x3_s rest_32x3[15]; 
+       float rest[15 * 3]; 
+   };
+};
+
+const hash32_t pycPosition[] = { tfStrHash32(tfCToStrRef("x")), tfStrHash32(tfCToStrRef("y")), tfStrHash32(tfCToStrRef("z")) };
+const hash32_t pycNormal[] = { tfStrHash32(tfCToStrRef("nx")), tfStrHash32(tfCToStrRef("ny")), tfStrHash32(tfCToStrRef("nz")) };
+const hash32_t pycScale[] = { tfStrHash32(tfCToStrRef("scale_0")), tfStrHash32(tfCToStrRef("scale_1")), tfStrHash32(tfCToStrRef("scale_2")) };
+const hash32_t pycDc[] = { tfStrHash32(tfCToStrRef("f_dc_0")), tfStrHash32(tfCToStrRef("f_dc_1")), tfStrHash32(tfCToStrRef("f_dc_2")) };
+const hash32_t pycRotation[] = { tfStrHash32(tfCToStrRef("rot_0")), tfStrHash32(tfCToStrRef("rot_1")), tfStrHash32(tfCToStrRef("rot_2")),tfStrHash32(tfCToStrRef("rot_3"))  };
+const hash32_t pycFeatureReset[] = {
     tfStrHash32(tfCToStrRef("f_rest_0")),  tfStrHash32(tfCToStrRef("f_rest_1")),  tfStrHash32(tfCToStrRef("f_rest_2")),
     tfStrHash32(tfCToStrRef("f_rest_3")),  tfStrHash32(tfCToStrRef("f_rest_4")),  tfStrHash32(tfCToStrRef("f_rest_5")),
     tfStrHash32(tfCToStrRef("f_rest_6")),  tfStrHash32(tfCToStrRef("f_rest_7")),  tfStrHash32(tfCToStrRef("f_rest_8")),
@@ -105,7 +118,7 @@ const hash32_t gPycFeaturesReset[] = {
     tfStrHash32(tfCToStrRef("f_rest_39")), tfStrHash32(tfCToStrRef("f_rest_40")), tfStrHash32(tfCToStrRef("f_rest_41")),
     tfStrHash32(tfCToStrRef("f_rest_42")), tfStrHash32(tfCToStrRef("f_rest_43")), tfStrHash32(tfCToStrRef("f_rest_44")),
 };
-const uint32_t gFeatureReset = TF_ARRAY_COUNT(gPycFeaturesReset) / 3;
+static const size_t gNumberOfFeatures = TF_ARRAY_COUNT(pycFeatureReset);
 
 RendererContext* pContext = NULL;
 Renderer*        pRenderer = NULL;
@@ -121,9 +134,13 @@ Shader* pParticleShader = NULL;
 Pipeline* pParticlePipeline = NULL;
 
 RootSignature* pRootSignature = NULL;
-Buffer* pGaussianPosition = NULL;
-Buffer* pFeatureRest = NULL;
-Buffer* pGaussianColor = NULL;
+Buffer* pPositionBuffer = NULL;
+Buffer* pShsBuffer = NULL;
+Buffer* pColorBuffer = NULL;
+Buffer* pNormalBuffer = NULL;
+Buffer* pScaleBuffer = NULL;
+Buffer* pRotationBuffer = NULL;
+
 Buffer* pProjViewUniformBuffer[gDataBufferCount] = { NULL };
 
 DescriptorSet* pDescriptorSetUniforms = { NULL };
@@ -349,7 +366,7 @@ public:
             //property float rot_2
             //property float rot_3
 
-            if (!fsOpenStreamFromPath(RD_OTHER_FILES, "drjohnson/point_cloud/iteration_7000/point_cloud.ply", FM_READ, &fh)) 
+            if (!fsOpenStreamFromPath(RD_OTHER_FILES, "treehill/point_cloud/iteration_7000/point_cloud.ply", FM_READ, &fh)) 
                 return false;
             struct TPlyReader reader = {};
             if(!tfAddPlyFileReader(&fh, &reader)) {
@@ -369,15 +386,15 @@ public:
                 positionVbDesc.mDesc.mDescriptors = DESCRIPTOR_TYPE_VERTEX_BUFFER;
                 positionVbDesc.mDesc.mMemoryUsage = RESOURCE_MEMORY_USAGE_GPU_ONLY;
                 positionVbDesc.mDesc.mSize = sizeof(struct Tf32x3_s) * element->mNumElements;
-                positionVbDesc.ppBuffer = &pGaussianPosition;
+                positionVbDesc.ppBuffer = &pPositionBuffer;
                 addResource(&positionVbDesc, NULL);
             }
             {
                 BufferLoadDesc positionShDesc = {};
                 positionShDesc.mDesc.mDescriptors = DESCRIPTOR_TYPE_VERTEX_BUFFER;
                 positionShDesc.mDesc.mMemoryUsage = RESOURCE_MEMORY_USAGE_GPU_ONLY;
-                positionShDesc.mDesc.mSize = sizeof(struct Tf32x3_s) * gFeatureReset * element->mNumElements;
-                positionShDesc.ppBuffer = &pFeatureRest;
+                positionShDesc.mDesc.mSize = sizeof(struct SphericalHarmonics)* element->mNumElements;
+                positionShDesc.ppBuffer = &pShsBuffer;
                 addResource(&positionShDesc, NULL);
             }
             {
@@ -385,41 +402,89 @@ public:
                 colorVbDesc.mDesc.mDescriptors = DESCRIPTOR_TYPE_VERTEX_BUFFER;
                 colorVbDesc.mDesc.mMemoryUsage = RESOURCE_MEMORY_USAGE_GPU_ONLY;
                 colorVbDesc.mDesc.mSize = sizeof(struct Tf32x3_s) * element->mNumElements;
-                colorVbDesc.ppBuffer = &pGaussianColor;
+                colorVbDesc.ppBuffer = &pColorBuffer;
                 addResource(&colorVbDesc, NULL);
             }
+            {
+                BufferLoadDesc bufferDesc = {};
+                bufferDesc.mDesc.mDescriptors = DESCRIPTOR_TYPE_VERTEX_BUFFER;
+                bufferDesc.mDesc.mMemoryUsage = RESOURCE_MEMORY_USAGE_GPU_ONLY;
+                bufferDesc.mDesc.mSize = sizeof(struct Tf32x3_s) * element->mNumElements;
+                bufferDesc.ppBuffer = &pNormalBuffer;
+                addResource(&bufferDesc, NULL);
+            }
+            {
+                BufferLoadDesc bufferDesc = {};
+                bufferDesc.mDesc.mDescriptors = DESCRIPTOR_TYPE_VERTEX_BUFFER;
+                bufferDesc.mDesc.mMemoryUsage = RESOURCE_MEMORY_USAGE_GPU_ONLY;
+                bufferDesc.mDesc.mSize = sizeof(struct Tf32x3_s) * element->mNumElements;
+                bufferDesc.ppBuffer = &pScaleBuffer;
+                addResource(&bufferDesc, NULL);
+            }
+            {
+                BufferLoadDesc bufferDesc = {};
+                bufferDesc.mDesc.mDescriptors = DESCRIPTOR_TYPE_VERTEX_BUFFER;
+                bufferDesc.mDesc.mMemoryUsage = RESOURCE_MEMORY_USAGE_GPU_ONLY;
+                bufferDesc.mDesc.mSize = sizeof(struct Tf32x4_s) * element->mNumElements;
+                bufferDesc.ppBuffer = &pRotationBuffer;
+                addResource(&bufferDesc, NULL);
+            }
 
-            BufferUpdateDesc positionUpdateDesc = { pGaussianPosition };
-            BufferUpdateDesc colorUpdateDesc = { pGaussianColor };
-            BufferUpdateDesc featureUpdateDesc = { pFeatureRest };
+            BufferUpdateDesc positionUpdateDesc = { pPositionBuffer };
+            BufferUpdateDesc colorUpdateDesc = { pColorBuffer };
+            BufferUpdateDesc shsUpdateDesc = { pShsBuffer };
+            BufferUpdateDesc normalUpdateDesc = { pNormalBuffer };
+            BufferUpdateDesc scaleUpdateDesc = { pScaleBuffer };
+            BufferUpdateDesc rotationUpdateDesc = { pRotationBuffer};
             beginUpdateResource(&positionUpdateDesc);
             beginUpdateResource(&colorUpdateDesc);
-            beginUpdateResource(&featureUpdateDesc);
+            beginUpdateResource(&shsUpdateDesc);
+            beginUpdateResource(&normalUpdateDesc);
+            beginUpdateResource(&scaleUpdateDesc);
+            beginUpdateResource(&rotationUpdateDesc);
             struct TPlyAttribResult findAttrib;
             mNumOfPoints = element->mNumElements;
+        
             for (size_t eleIdx = 0; eleIdx < element->mNumElements; eleIdx++, cursor += tfPlyNextElement(&fh, &reader, cursor, element)) {
-                if(eleIdx % 1000 == 0)
-                LOGF(eINFO, "processing element %lu/%lu", eleIdx, element->mNumElements);
-                struct Tf32x3_s pos;
-                struct TPlyNumber number;
-                hash32_t posArgs[3] = {tfStrHash32(tfCToStrRef("x")), tfStrHash32(tfCToStrRef("y")), tfStrHash32(tfCToStrRef("z"))};
-                if (!plyUtilReadf32x3(&fh, &reader, cursor, element, posArgs, &pos))
-                    return false;
-
-                for (size_t fIdx = 0; fIdx < gFeatureReset; fIdx++) {
-                    struct Tf32x3_s feature;
-                    hash32_t resetArg[3] = {gPycFeaturesReset[(fIdx * 3)], gPycFeaturesReset[(fIdx * 3) + 1], gPycFeaturesReset[(fIdx * 3) + 2]};
-                    if (!plyUtilReadf32x3(&fh, &reader, cursor, element, resetArg, &feature))
-                        return false;
-                    ((Tf32x3_s*)featureUpdateDesc.pMappedData)[(eleIdx * gFeatureReset) + fIdx] = feature;
+                {
+                    struct TPlyNumber pos[3];
+                    tfPlyDecodeNumbersByRefs(&fh, &reader, element, cursor, TF_ARRAY_COUNT(pycPosition), pycPosition, pos);
+                    ((Tf32x3_s*)positionUpdateDesc.pMappedData)[eleIdx] = {pos[0].flt, pos[1].flt, pos[2].flt};
+                    ((Tf32x3_s*)colorUpdateDesc.pMappedData)[eleIdx] = {pos[0].flt, pos[1].flt, pos[2].flt};
                 }
-
-                ((Tf32x3_s*)positionUpdateDesc.pMappedData)[eleIdx] = pos;
-                ((Tf32x3_s*)colorUpdateDesc.pMappedData)[eleIdx] = pos;
+                {
+                    struct TPlyNumber normal[3];
+                    tfPlyDecodeNumbersByRefs(&fh, &reader, element, cursor, TF_ARRAY_COUNT(pycNormal), pycNormal, normal);
+                    ((struct Tf32x3_s*)normalUpdateDesc.pMappedData)[eleIdx] = {normal[0].flt, normal[1].flt, normal[2].flt};
+                }
+                {
+                    struct TPlyNumber scale[3];
+                    tfPlyDecodeNumbersByRefs(&fh, &reader, element, cursor, TF_ARRAY_COUNT(pycScale), pycScale, scale);
+                    ((struct Tf32x3_s*)scaleUpdateDesc.pMappedData)[eleIdx] = { scale[0].flt, scale[1].flt, scale[2].flt };
+                }
+                {
+                    struct TPlyNumber rotations[4];
+                    tfPlyDecodeNumbersByRefs(&fh, &reader, element, cursor, TF_ARRAY_COUNT(pycRotation), pycRotation, rotations);
+                    ((struct Tf32x4_s*)rotationUpdateDesc.pMappedData)[eleIdx] = { rotations[0].flt, rotations[1].flt, rotations[2].flt, rotations[3].flt };
+                }
+                {
+                    struct SphericalHarmonics* harmoics = &((struct SphericalHarmonics*)shsUpdateDesc.pMappedData)[eleIdx];
+                    struct TPlyNumber rc[TF_ARRAY_COUNT(pycDc)];
+                    struct TPlyNumber featureReset[TF_ARRAY_COUNT(pycFeatureReset)];
+                    tfPlyDecodeNumbersByRefs(&fh, &reader, element, cursor, gNumberOfFeatures, pycFeatureReset, featureReset);
+                    for (size_t fIdx = 0; fIdx < TF_ARRAY_COUNT(pycFeatureReset); fIdx++) {
+                        harmoics->rest[fIdx] = featureReset[fIdx].flt;
+                    }
+                    tfPlyDecodeNumbersByRefs(&fh, &reader, element, cursor, TF_ARRAY_COUNT(pycDc), pycDc, rc);
+                    harmoics->dc = { rc[0].flt, rc[1].flt, rc[2].flt };
+                }
             }
             endUpdateResource(&colorUpdateDesc);
             endUpdateResource(&positionUpdateDesc);
-            endUpdateResource(&featureUpdateDesc);
+            endUpdateResource(&shsUpdateDesc);
+            endUpdateResource(&normalUpdateDesc);
+            endUpdateResource(&scaleUpdateDesc);
+            endUpdateResource(&rotationUpdateDesc);
 
             tfFreePlyFileReader(&reader);
            // gGaussianPoints = (struct GaussianPoint*)tf_malloc(sizeof(GaussianPoint) * mNumOfPoints);
@@ -897,7 +962,7 @@ public:
         cmdSetViewport(cmd, 0.0f, 0.0f, (float)pRenderTarget->mWidth, (float)pRenderTarget->mHeight, 1.0f, 1.0f);
         cmdBindDescriptorSet(cmd, gFrameIndex, pDescriptorSetUniforms);
         {
-            Buffer*  bufferArgs[2] = { pGaussianPosition, pGaussianColor };
+            Buffer*  bufferArgs[2] = { pPositionBuffer, pColorBuffer };
             uint32_t strideArgs[2] = { sizeof(struct Tf32x3_s), sizeof(struct Tf32x3_s) };
             cmdBindVertexBuffer(cmd, 2, bufferArgs, strideArgs, NULL);
         }
